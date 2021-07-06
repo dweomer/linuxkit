@@ -12,9 +12,10 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/reference"
-	"github.com/google/go-containerregistry/pkg/v1"
+	registry "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/linuxkit/linuxkit/src/cmd/linuxkit/cache"
 	lktspec "github.com/linuxkit/linuxkit/src/cmd/linuxkit/spec"
+	"github.com/linuxkit/linuxkit/src/cmd/linuxkit/util"
 	"github.com/linuxkit/linuxkit/src/cmd/linuxkit/version"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	log "github.com/sirupsen/logrus"
@@ -64,14 +65,6 @@ func WithBuildForce() BuildOpt {
 func WithBuildPush() BuildOpt {
 	return func(bo *buildOpts) error {
 		bo.push = true
-		return nil
-	}
-}
-
-// WithBuildImage builds the image
-func WithBuildImage() BuildOpt {
-	return func(bo *buildOpts) error {
-		bo.image = true
 		return nil
 	}
 }
@@ -163,15 +156,9 @@ func (p Pkg) Build(bos ...BuildOpt) error {
 	}
 
 	arch := runtime.GOARCH
-	ref, err := reference.Parse(p.Tag())
+	ref, err := reference.Parse(p.FullTag())
 	if err != nil {
 		return fmt.Errorf("could not resolve references for image %s: %v", p.Tag(), err)
-	}
-
-	for _, platform := range bo.platforms {
-		if !p.archSupported(platform.Architecture) {
-			return fmt.Errorf("arch %s not supported by this package, skipping build", platform.Architecture)
-		}
 	}
 
 	if err := p.cleanForBuild(); err != nil {
@@ -226,18 +213,22 @@ func (p Pkg) Build(bos ...BuildOpt) error {
 		return fmt.Errorf("buildkit not supported, check docker version: %v", err)
 	}
 
+	skipBuild := bo.skipBuild
 	if !bo.force {
-		if _, err := c.ImagePull(&ref, "", arch); err == nil {
-			fmt.Fprintf(writer, "image already found %s", ref)
-			return nil
+		fmt.Fprintf(writer, "checking for %s in local cache, fallback to remote registry...\n", ref)
+		if _, err := c.ImagePull(&ref, "", arch, false); err == nil {
+			fmt.Fprintf(writer, "%s found or pulled\n", ref)
+			skipBuild = true
+		} else {
+			fmt.Fprintf(writer, "%s not found\n", ref)
 		}
-		fmt.Fprintln(writer, "No image pulled, continuing with build")
 	}
 
-	if bo.image && !bo.skipBuild {
+	if !skipBuild {
+		fmt.Fprintf(writer, "building %s\n", ref)
 		var (
 			args  []string
-			descs []v1.Descriptor
+			descs []registry.Descriptor
 		)
 
 		if p.git != nil && p.gitRepo != "" {
@@ -291,7 +282,7 @@ func (p Pkg) Build(bos ...BuildOpt) error {
 	}
 
 	// get descriptor for root of manifest
-	desc, err := c.FindDescriptor(p.Tag())
+	desc, err := c.FindDescriptor(p.FullTag())
 	if err != nil {
 		return err
 	}
@@ -299,7 +290,7 @@ func (p Pkg) Build(bos ...BuildOpt) error {
 	// if requested docker, load the image up
 	if bo.targetDocker {
 		cacheSource := c.NewSource(&ref, arch, desc)
-		reader, err := cacheSource.TarReader()
+		reader, err := cacheSource.V1TarReader()
 		if err != nil {
 			return fmt.Errorf("unable to get reader from cache: %v", err)
 		}
@@ -318,7 +309,7 @@ func (p Pkg) Build(bos ...BuildOpt) error {
 	}
 
 	// push the manifest
-	if err := c.Push(p.Tag()); err != nil {
+	if err := c.Push(p.FullTag()); err != nil {
 		return err
 	}
 
@@ -331,21 +322,22 @@ func (p Pkg) Build(bos ...BuildOpt) error {
 	if err != nil {
 		return err
 	}
+	fullRelTag := util.ReferenceExpand(relTag)
 
-	ref, err = reference.Parse(relTag)
+	ref, err = reference.Parse(fullRelTag)
 	if err != nil {
 		return err
 	}
 	if _, err := c.DescriptorWrite(&ref, *desc); err != nil {
 		return err
 	}
-	if err := c.Push(relTag); err != nil {
+	if err := c.Push(fullRelTag); err != nil {
 		return err
 	}
 
 	// tag in docker, if requested
 	if bo.targetDocker {
-		if err := d.tag(p.Tag(), relTag); err != nil {
+		if err := d.tag(p.FullTag(), fullRelTag); err != nil {
 			return err
 		}
 	}
@@ -356,26 +348,21 @@ func (p Pkg) Build(bos ...BuildOpt) error {
 }
 
 // buildArch builds the package for a single arch
-func (p Pkg) buildArch(d dockerRunner, c lktspec.CacheProvider, arch string, args []string, writer io.Writer, bo buildOpts) (*v1.Descriptor, error) {
+func (p Pkg) buildArch(d dockerRunner, c lktspec.CacheProvider, arch string, args []string, writer io.Writer, bo buildOpts) (*registry.Descriptor, error) {
 	var (
-		desc    *v1.Descriptor
+		desc    *registry.Descriptor
 		tagArch string
 		tag     = p.Tag()
 	)
-	switch arch {
-	case "amd64", "arm64", "s390x":
-		tagArch = tag + "-" + arch
-	default:
-		return nil, fmt.Errorf("Unknown arch %q", arch)
-	}
+	tagArch = tag + "-" + arch
 	fmt.Fprintf(writer, "Building for arch %s as %s\n", arch, tagArch)
 
 	if !bo.force {
-		ref, err := reference.Parse(p.Tag())
+		ref, err := reference.Parse(p.FullTag())
 		if err != nil {
 			return nil, fmt.Errorf("could not resolve references for image %s: %v", p.Tag(), err)
 		}
-		if _, err := c.ImagePull(&ref, "", arch); err == nil {
+		if _, err := c.ImagePull(&ref, "", arch, false); err == nil {
 			fmt.Fprintf(writer, "image already found %s for arch %s", ref, arch)
 			desc, err := c.FindDescriptor(ref.String())
 			if err != nil {
@@ -393,8 +380,6 @@ func (p Pkg) buildArch(d dockerRunner, c lktspec.CacheProvider, arch string, arg
 	// find the desired builder
 	builderName := getBuilderForPlatform(arch, bo.builders)
 
-	d.setBuildCtx(&buildCtx{sources: p.sources})
-
 	// set the target
 	var (
 		buildxOutput string
@@ -406,7 +391,7 @@ func (p Pkg) buildArch(d dockerRunner, c lktspec.CacheProvider, arch string, arg
 			}
 		}
 	)
-	ref, err := reference.Parse(tag)
+	ref, err := reference.Parse(p.FullTag())
 	if err != nil {
 		return nil, fmt.Errorf("could not resolve references for image %s: %v", tagArch, err)
 	}
@@ -429,10 +414,11 @@ func (p Pkg) buildArch(d dockerRunner, c lktspec.CacheProvider, arch string, arg
 	})
 	args = append(args, fmt.Sprintf("--output=%s", buildxOutput))
 
+	buildCtx := &buildCtx{sources: p.sources}
 	platform := fmt.Sprintf("linux/%s", arch)
 	archArgs := append(args, "--platform")
 	archArgs = append(archArgs, platform)
-	if err := d.build(tagArch, p.path, builderName, platform, stdout, archArgs...); err != nil {
+	if err := d.build(tagArch, p.path, builderName, platform, buildCtx.Reader(), stdout, archArgs...); err != nil {
 		stdoutCloser()
 		if strings.Contains(err.Error(), "executor failed running [/dev/.buildkit_qemu_emulator") {
 			return nil, fmt.Errorf("buildkit was unable to emulate %s. check binfmt has been set up and works for this platform: %v", platform, err)
@@ -451,71 +437,90 @@ func (p Pkg) buildArch(d dockerRunner, c lktspec.CacheProvider, arch string, arg
 
 type buildCtx struct {
 	sources []pkgSource
+	err     error
+	r       io.ReadCloser
 }
 
-// Copy iterates over the sources, tars up the content after rewriting the paths.
+// Reader gets an io.Reader by iterating over the sources, tarring up the content after rewriting the paths.
 // It assumes that sources is sane, ie is well formed and the first part is an absolute path
 // and that it exists. NewFromCLI() ensures that.
-func (c *buildCtx) Copy(w io.WriteCloser) error {
+func (c *buildCtx) Reader() io.ReadCloser {
+	r, w := io.Pipe()
 	tw := tar.NewWriter(w)
-	defer func() {
-		tw.Close()
-		w.Close()
-	}()
 
-	for _, s := range c.sources {
-		log.Debugf("Adding to build context: %s -> %s", s.src, s.dst)
+	go func() {
+		defer func() {
+			tw.Close()
+			w.Close()
+		}()
+		for _, s := range c.sources {
+			log.Debugf("Adding to build context: %s -> %s", s.src, s.dst)
 
-		f := func(p string, i os.FileInfo, err error) error {
-			if err != nil {
-				return fmt.Errorf("ctx: Walk error on %s: %v", p, err)
-			}
-
-			var link string
-			if i.Mode()&os.ModeSymlink != 0 {
-				var err error
-				link, err = os.Readlink(p)
+			f := func(p string, i os.FileInfo, err error) error {
 				if err != nil {
-					return fmt.Errorf("ctx: Failed to read symlink %s: %v", p, err)
+					return fmt.Errorf("ctx: Walk error on %s: %v", p, err)
 				}
-			}
 
-			h, err := tar.FileInfoHeader(i, link)
-			if err != nil {
-				return fmt.Errorf("ctx: Converting FileInfo for %s: %v", p, err)
-			}
-			rel, err := filepath.Rel(s.src, p)
-			if err != nil {
-				return err
-			}
-			h.Name = filepath.ToSlash(filepath.Join(s.dst, rel))
-			if err := tw.WriteHeader(h); err != nil {
-				return fmt.Errorf("ctx: Writing header for %s: %v", p, err)
-			}
+				var link string
+				if i.Mode()&os.ModeSymlink != 0 {
+					var err error
+					link, err = os.Readlink(p)
+					if err != nil {
+						return fmt.Errorf("ctx: Failed to read symlink %s: %v", p, err)
+					}
+				}
 
-			if !i.Mode().IsRegular() {
+				h, err := tar.FileInfoHeader(i, link)
+				if err != nil {
+					return fmt.Errorf("ctx: Converting FileInfo for %s: %v", p, err)
+				}
+				rel, err := filepath.Rel(s.src, p)
+				if err != nil {
+					return err
+				}
+				h.Name = filepath.ToSlash(filepath.Join(s.dst, rel))
+				if err := tw.WriteHeader(h); err != nil {
+					return fmt.Errorf("ctx: Writing header for %s: %v", p, err)
+				}
+
+				if !i.Mode().IsRegular() {
+					return nil
+				}
+
+				f, err := os.Open(p)
+				if err != nil {
+					return fmt.Errorf("ctx: Open %s: %v", p, err)
+				}
+				defer f.Close()
+
+				_, err = io.Copy(tw, f)
+				if err != nil {
+					return fmt.Errorf("ctx: Writing %s: %v", p, err)
+				}
 				return nil
 			}
 
-			f, err := os.Open(p)
-			if err != nil {
-				return fmt.Errorf("ctx: Open %s: %v", p, err)
+			if err := filepath.Walk(s.src, f); err != nil {
+				c.err = err
+				return
 			}
-			defer f.Close()
-
-			_, err = io.Copy(tw, f)
-			if err != nil {
-				return fmt.Errorf("ctx: Writing %s: %v", p, err)
-			}
-			return nil
 		}
+	}()
+	c.r = r
+	return c
+}
 
-		if err := filepath.Walk(s.src, f); err != nil {
-			return err
-		}
+// Read wraps the usual read, but allows us to include an error
+func (c *buildCtx) Read(data []byte) (n int, err error) {
+	if c.err != nil {
+		return 0, err
 	}
+	return c.r.Read(data)
+}
 
-	return nil
+// Close wraps the usual close
+func (c *buildCtx) Close() error {
+	return c.r.Close()
 }
 
 // getBuilderForPlatform given an arch, find the context for the desired builder.

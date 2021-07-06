@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/reference"
-	"github.com/google/go-containerregistry/pkg/v1"
+	registry "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	lktspec "github.com/linuxkit/linuxkit/src/cmd/linuxkit/spec"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -25,7 +25,6 @@ type dockerMocker struct {
 	enableTag       bool
 	enableBuild     bool
 	enablePull      bool
-	ctx             buildContext
 	fixedReadName   string
 	builds          []buildLog
 }
@@ -51,7 +50,7 @@ func (d *dockerMocker) tag(ref, tag string) error {
 	d.images[tag] = d.images[ref]
 	return nil
 }
-func (d *dockerMocker) build(tag, pkg, dockerContext, platform string, stdout io.Writer, opts ...string) error {
+func (d *dockerMocker) build(tag, pkg, dockerContext, platform string, stdin io.Reader, stdout io.Writer, opts ...string) error {
 	if !d.enableBuild {
 		return errors.New("build disabled")
 	}
@@ -86,10 +85,6 @@ func (d *dockerMocker) pull(img string) (bool, error) {
 	}
 	return false, errors.New("failed to pull")
 }
-func (d *dockerMocker) setBuildCtx(ctx buildContext) {
-	d.ctx = ctx
-
-}
 
 type cacheMocker struct {
 	enablePush             bool
@@ -97,11 +92,11 @@ type cacheMocker struct {
 	enableImagePull        bool
 	enableImageLoad        bool
 	enableIndexWrite       bool
-	images                 map[string][]v1.Descriptor
+	images                 map[string][]registry.Descriptor
 	hashes                 map[string][]byte
 }
 
-func (c *cacheMocker) ImagePull(ref *reference.Spec, trustedRef, architecture string) (lktspec.ImageSource, error) {
+func (c *cacheMocker) ImagePull(ref *reference.Spec, trustedRef, architecture string, alwaysPull bool) (lktspec.ImageSource, error) {
 	if !c.enableImagePull {
 		return nil, errors.New("ImagePull disabled")
 	}
@@ -126,15 +121,15 @@ func (c *cacheMocker) imageWriteStream(ref *reference.Spec, architecture string,
 	if err != nil {
 		return nil, fmt.Errorf("error reading data: %v", err)
 	}
-	hash, size, err := v1.SHA256(bytes.NewReader(b))
+	hash, size, err := registry.SHA256(bytes.NewReader(b))
 	if err != nil {
 		return nil, fmt.Errorf("error calculating hash of layer: %v", err)
 	}
 	c.assignHash(hash.String(), b)
 
-	im := v1.Manifest{
+	im := registry.Manifest{
 		MediaType: types.OCIManifestSchema1,
-		Layers: []v1.Descriptor{
+		Layers: []registry.Descriptor{
 			{MediaType: types.OCILayer, Size: size, Digest: hash},
 		},
 		SchemaVersion: 2,
@@ -145,12 +140,12 @@ func (c *cacheMocker) imageWriteStream(ref *reference.Spec, architecture string,
 	if err != nil {
 		return nil, fmt.Errorf("unable to marshal new image to json: %v", err)
 	}
-	hash, size, err = v1.SHA256(bytes.NewReader(b))
+	hash, size, err = registry.SHA256(bytes.NewReader(b))
 	if err != nil {
 		return nil, fmt.Errorf("error calculating hash of index json: %v", err)
 	}
 	c.assignHash(hash.String(), b)
-	desc := v1.Descriptor{
+	desc := registry.Descriptor{
 		MediaType: types.OCIManifestSchema1,
 		Size:      size,
 		Digest:    hash,
@@ -163,12 +158,12 @@ func (c *cacheMocker) imageWriteStream(ref *reference.Spec, architecture string,
 	return c.NewSource(ref, "", &desc), nil
 }
 
-func (c *cacheMocker) IndexWrite(ref *reference.Spec, descriptors ...v1.Descriptor) (lktspec.ImageSource, error) {
+func (c *cacheMocker) IndexWrite(ref *reference.Spec, descriptors ...registry.Descriptor) (lktspec.ImageSource, error) {
 	if !c.enableIndexWrite {
 		return nil, errors.New("disabled")
 	}
 	image := ref.String()
-	im := v1.IndexManifest{
+	im := registry.IndexManifest{
 		MediaType:     types.OCIImageIndex,
 		Manifests:     descriptors,
 		SchemaVersion: 2,
@@ -179,12 +174,12 @@ func (c *cacheMocker) IndexWrite(ref *reference.Spec, descriptors ...v1.Descript
 	if err != nil {
 		return nil, fmt.Errorf("unable to marshal new index to json: %v", err)
 	}
-	hash, size, err := v1.SHA256(bytes.NewReader(b))
+	hash, size, err := registry.SHA256(bytes.NewReader(b))
 	if err != nil {
 		return nil, fmt.Errorf("error calculating hash of index json: %v", err)
 	}
 	c.assignHash(hash.String(), b)
-	desc := v1.Descriptor{
+	desc := registry.Descriptor{
 		MediaType: types.OCIImageIndex,
 		Size:      size,
 		Digest:    hash,
@@ -206,15 +201,15 @@ func (c *cacheMocker) Push(name string) error {
 	return nil
 }
 
-func (c *cacheMocker) DescriptorWrite(ref *reference.Spec, descriptors ...v1.Descriptor) (lktspec.ImageSource, error) {
+func (c *cacheMocker) DescriptorWrite(ref *reference.Spec, desc registry.Descriptor) (lktspec.ImageSource, error) {
 	if !c.enabledDescriptorWrite {
 		return nil, errors.New("descriptor disabled")
 	}
 	var (
 		image = ref.String()
-		im    = v1.IndexManifest{
+		im    = registry.IndexManifest{
 			MediaType:     types.OCIImageIndex,
-			Manifests:     descriptors,
+			Manifests:     []registry.Descriptor{desc},
 			SchemaVersion: 2,
 		}
 	)
@@ -223,12 +218,12 @@ func (c *cacheMocker) DescriptorWrite(ref *reference.Spec, descriptors ...v1.Des
 	if err != nil {
 		return nil, fmt.Errorf("unable to marshal new index to json: %v", err)
 	}
-	hash, size, err := v1.SHA256(bytes.NewReader(b))
+	hash, size, err := registry.SHA256(bytes.NewReader(b))
 	if err != nil {
 		return nil, fmt.Errorf("error calculating hash of index json: %v", err)
 	}
 	c.assignHash(hash.String(), b)
-	root := v1.Descriptor{
+	root := registry.Descriptor{
 		MediaType: types.OCIImageIndex,
 		Size:      size,
 		Digest:    hash,
@@ -240,13 +235,13 @@ func (c *cacheMocker) DescriptorWrite(ref *reference.Spec, descriptors ...v1.Des
 
 	return c.NewSource(ref, "", &root), nil
 }
-func (c *cacheMocker) FindDescriptor(name string) (*v1.Descriptor, error) {
+func (c *cacheMocker) FindDescriptor(name string) (*registry.Descriptor, error) {
 	if desc, ok := c.images[name]; ok && len(desc) > 0 {
 		return &desc[0], nil
 	}
 	return nil, fmt.Errorf("not found %s", name)
 }
-func (c *cacheMocker) NewSource(ref *reference.Spec, architecture string, descriptor *v1.Descriptor) lktspec.ImageSource {
+func (c *cacheMocker) NewSource(ref *reference.Spec, architecture string, descriptor *registry.Descriptor) lktspec.ImageSource {
 	return cacheMockerSource{c, ref, architecture, descriptor}
 }
 func (c *cacheMocker) assignHash(hash string, b []byte) {
@@ -255,9 +250,9 @@ func (c *cacheMocker) assignHash(hash string, b []byte) {
 	}
 	c.hashes[hash] = b
 }
-func (c *cacheMocker) appendImage(image string, root v1.Descriptor) {
+func (c *cacheMocker) appendImage(image string, root registry.Descriptor) {
 	if c.images == nil {
-		c.images = map[string][]v1.Descriptor{}
+		c.images = map[string][]registry.Descriptor{}
 	}
 	c.images[image] = append(c.images[image], root)
 }
@@ -266,7 +261,7 @@ type cacheMockerSource struct {
 	c            *cacheMocker
 	ref          *reference.Spec
 	architecture string
-	descriptor   *v1.Descriptor
+	descriptor   *registry.Descriptor
 }
 
 func (c cacheMockerSource) Config() (imagespec.ImageConfig, error) {
@@ -275,7 +270,10 @@ func (c cacheMockerSource) Config() (imagespec.ImageConfig, error) {
 func (c cacheMockerSource) TarReader() (io.ReadCloser, error) {
 	return nil, errors.New("unsupported")
 }
-func (c cacheMockerSource) Descriptor() *v1.Descriptor {
+func (c cacheMockerSource) V1TarReader() (io.ReadCloser, error) {
+	return nil, errors.New("unsupported")
+}
+func (c cacheMockerSource) Descriptor() *registry.Descriptor {
 	return c.descriptor
 }
 
@@ -298,16 +296,14 @@ func TestBuild(t *testing.T) {
 		cache   *cacheMocker
 		err     string
 	}{
-		{"missing tag", Pkg{}, nil, nil, &dockerMocker{}, &cacheMocker{}, "could not resolve references"},
 		{"invalid tag", Pkg{image: "docker.io/foo/bar:abc:def:ghi"}, nil, nil, &dockerMocker{}, &cacheMocker{}, "could not resolve references"},
-		{"mismatched platforms", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"arm64"}}, nil, []string{"amd64"}, nil, nil, fmt.Sprintf("arch %s not supported", "amd64")},
 		{"not at head", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64"}, commitHash: "foo"}, nil, []string{"amd64"}, &dockerMocker{supportBuildKit: false}, &cacheMocker{}, "Cannot build from commit hash != HEAD"},
 		{"no build cache", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64"}, commitHash: "HEAD"}, nil, []string{"amd64"}, &dockerMocker{supportBuildKit: false}, &cacheMocker{}, "must provide linuxkit build cache"},
 		{"unsupported buildkit", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64"}, commitHash: "HEAD"}, []BuildOpt{WithBuildCacheDir(cacheDir)}, []string{"amd64"}, &dockerMocker{supportBuildKit: false}, &cacheMocker{}, "buildkit not supported, check docker version"},
 		{"load docker without local platform", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64", "arm64"}, commitHash: "HEAD"}, []BuildOpt{WithBuildCacheDir(cacheDir), WithBuildTargetDockerCache()}, []string{nonLocal}, &dockerMocker{supportBuildKit: false}, &cacheMocker{}, "must build for local platform"},
-		{"amd64", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64", "arm64"}, commitHash: "HEAD"}, []BuildOpt{WithBuildCacheDir(cacheDir), WithBuildImage()}, []string{"amd64"}, &dockerMocker{supportBuildKit: true, enableBuild: true}, &cacheMocker{enableImagePull: false, enableImageLoad: true, enableIndexWrite: true}, ""},
-		{"arm64", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64", "arm64"}, commitHash: "HEAD"}, []BuildOpt{WithBuildCacheDir(cacheDir), WithBuildImage()}, []string{"arm64"}, &dockerMocker{supportBuildKit: true, enableBuild: true}, &cacheMocker{enableImagePull: false, enableImageLoad: true, enableIndexWrite: true}, ""},
-		{"amd64 and arm64", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64", "arm64"}, commitHash: "HEAD"}, []BuildOpt{WithBuildCacheDir(cacheDir), WithBuildImage()}, []string{"amd64", "arm64"}, &dockerMocker{supportBuildKit: true, enableBuild: true}, &cacheMocker{enableImagePull: false, enableImageLoad: true, enableIndexWrite: true}, ""},
+		{"amd64", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64", "arm64"}, commitHash: "HEAD"}, []BuildOpt{WithBuildCacheDir(cacheDir)}, []string{"amd64"}, &dockerMocker{supportBuildKit: true, enableBuild: true}, &cacheMocker{enableImagePull: false, enableImageLoad: true, enableIndexWrite: true}, ""},
+		{"arm64", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64", "arm64"}, commitHash: "HEAD"}, []BuildOpt{WithBuildCacheDir(cacheDir)}, []string{"arm64"}, &dockerMocker{supportBuildKit: true, enableBuild: true}, &cacheMocker{enableImagePull: false, enableImageLoad: true, enableIndexWrite: true}, ""},
+		{"amd64 and arm64", Pkg{org: "foo", image: "bar", hash: "abc", arches: []string{"amd64", "arm64"}, commitHash: "HEAD"}, []BuildOpt{WithBuildCacheDir(cacheDir)}, []string{"amd64", "arm64"}, &dockerMocker{supportBuildKit: true, enableBuild: true}, &cacheMocker{enableImagePull: false, enableImageLoad: true, enableIndexWrite: true}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.msg, func(t *testing.T) {

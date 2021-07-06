@@ -57,7 +57,7 @@ jobs:
 
     - name: Build
       run: |
-        make GOARCH=${{matrix.target.arch}} GOOS=${{matrix.target.os}} LOCAL_TARGET=bin/linuxkit-${{matrix.target.suffix}} local-build
+        make GOARCH=${{matrix.target.arch}} GOOS=${{matrix.target.os}} LOCAL_TARGET=$(pwd)/bin/linuxkit-${{matrix.target.suffix}} local-build
         file bin/linuxkit-${{matrix.target.suffix}}
       env:
         GOPATH: ${{runner.workspace}}
@@ -103,6 +103,14 @@ jobs:
         sudo ln -s $(pwd)/bin/linuxkit-amd64-linux /usr/local/bin/linuxkit
         /usr/local/bin/linuxkit version
 
+    - name: Cache Packages
+      uses: actions/cache@v2
+      with:
+        path: ~/.linuxkit/cache/
+        key: ${{ runner.os }}-linuxkit-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-linuxkit-
+    
     - name: Build Packages
       run: |
         make -C pkg build
@@ -149,7 +157,15 @@ jobs:
         chmod ugo+x bin/linuxkit-amd64-linux
         sudo ln -s $(pwd)/bin/linuxkit-amd64-linux /usr/local/bin/linuxkit
         /usr/local/bin/linuxkit version
-
+    
+    - name: Restore Package Cache
+      uses: actions/cache@v2
+      with:
+        path: ~/.linuxkit/cache/
+        key: ${{ runner.os }}-linuxkit-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-linuxkit-
+ 
     - name: Run Tests
       run: |
           cd test
