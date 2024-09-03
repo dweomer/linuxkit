@@ -100,7 +100,7 @@ jobs:
       run: docker run --privileged --rm tonistiigi/binfmt --install arm64
 
     - name: Download linuxkit
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4.1.7
       with:
         name: linuxkit-amd64-linux
         path: bin
@@ -163,7 +163,7 @@ jobs:
         sudo ln -s $(pwd)/bin/rtf /usr/local/bin/rtf
 
     - name: Download linuxkit
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4.1.7
       with:
         name: linuxkit-amd64-linux
         path: bin
@@ -215,7 +215,7 @@ jobs:
         sudo ln -s $(pwd)/bin/rtf /usr/local/bin/rtf
 
     - name: Download linuxkit
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4.1.7
       with:
         name: linuxkit-amd64-linux
         path: bin
@@ -275,7 +275,7 @@ jobs:
         sudo ln -s $(pwd)/bin/rtf /usr/local/bin/rtf
 
     - name: Download linuxkit
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4.1.7
       with:
         name: linuxkit-amd64-linux
         path: bin
@@ -319,7 +319,7 @@ jobs:
         sudo ln -s $(pwd)/bin/rtf /usr/local/bin/rtf
 
     - name: Download linuxkit
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4.1.7
       with:
         name: linuxkit-amd64-linux
         path: bin
@@ -371,7 +371,7 @@ jobs:
         sudo ln -s $(pwd)/bin/rtf /usr/local/bin/rtf
 
     - name: Download linuxkit
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4.1.7
       with:
         name: linuxkit-amd64-linux
         path: bin
